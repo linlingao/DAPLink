@@ -52,9 +52,37 @@ static const flash_intf_t flash_intf = {
 
 const flash_intf_t *const flash_intf_target = &flash_intf;
 
+static flash_func_t last_flash_func = FLASH_FUNC_NOP;
+
+static error_t flash_func_start(flash_func_t func)
+{
+    const program_target_t *const flash = target_device.flash_algo;
+
+    if (last_flash_func != func)
+    {
+        // Finish the currently active function.
+        if (FLASH_FUNC_NOP != last_flash_func &&
+            0 == swd_flash_syscall_exec(&flash->sys_call_s, flash->uninit, last_flash_func, 0, 0, 0)) {
+            return ERROR_UNINIT;
+        }
+
+        // Start a new function.
+        if (FLASH_FUNC_NOP != func &&
+            0 == swd_flash_syscall_exec(&flash->sys_call_s, flash->init, target_device.flash_start, 0, func, 0)) {
+            return ERROR_INIT;
+        }
+
+        last_flash_func = func;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 static error_t target_flash_init()
 {
     const program_target_t *const flash = target_device.flash_algo;
+
+    last_flash_func = FLASH_FUNC_NOP;
 
     if (0 == target_set_state(RESET_PROGRAM)) {
         return ERROR_RESET;
@@ -65,15 +93,17 @@ static error_t target_flash_init()
         return ERROR_ALGO_DL;
     }
 
-    if (0 == swd_flash_syscall_exec(&flash->sys_call_s, flash->init, target_device.flash_start, 0, 0, 0)) {
-        return ERROR_INIT;
-    }
-
     return ERROR_SUCCESS;
 }
 
 static error_t target_flash_uninit(void)
 {
+    error_t status = flash_func_start(FLASH_FUNC_NOP);
+
+    if (status != ERROR_SUCCESS) {
+        return status;
+    }
+    
     if (config_get_auto_rst()) {
         // Resume the target if configured to do so
         target_set_state(RESET_RUN);
@@ -88,11 +118,18 @@ static error_t target_flash_uninit(void)
 
 static error_t target_flash_program_page(uint32_t addr, const uint8_t *buf, uint32_t size)
 {
+    error_t status = ERROR_SUCCESS;
     const program_target_t *const flash = target_device.flash_algo;
 
     // check if security bits were set
     if (1 == security_bits_set(addr, (uint8_t *)buf, size)) {
         return ERROR_SECURITY_BITS;
+    }
+
+    status = flash_func_start(FLASH_FUNC_PROGRAM);
+
+    if (status != ERROR_SUCCESS) {
+        return status;
     }
 
     while (size > 0) {
@@ -141,11 +178,18 @@ static error_t target_flash_program_page(uint32_t addr, const uint8_t *buf, uint
 
 static error_t target_flash_erase_sector(uint32_t addr)
 {
+    error_t status = ERROR_SUCCESS;
     const program_target_t *const flash = target_device.flash_algo;
 
     // Check to make sure the address is on a sector boundary
     if ((addr % target_flash_erase_sector_size(addr)) != 0) {
         return ERROR_ERASE_SECTOR;
+    }
+
+    status = flash_func_start(FLASH_FUNC_ERASE);
+
+    if (status != ERROR_SUCCESS) {
+        return status;
     }
 
     if (0 == swd_flash_syscall_exec(&flash->sys_call_s, flash->erase_sector, addr, 0, 0, 0)) {
@@ -159,6 +203,12 @@ static error_t target_flash_erase_chip(void)
 {
     error_t status = ERROR_SUCCESS;
     const program_target_t *const flash = target_device.flash_algo;
+
+    status = flash_func_start(FLASH_FUNC_PROGRAM);
+
+    if (status != ERROR_SUCCESS) {
+        return status;
+    }
 
     if (0 == swd_flash_syscall_exec(&flash->sys_call_s, flash->erase_chip, 0, 0, 0, 0)) {
         return ERROR_ERASE_ALL;
